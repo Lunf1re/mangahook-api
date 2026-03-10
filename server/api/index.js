@@ -9,7 +9,7 @@ async function mdx(path) {
   try {
     const r = await http.get(MDX + path);
     return r.data;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -23,7 +23,7 @@ async function comick(path) {
       },
     });
     return r.data;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -56,6 +56,7 @@ function fmtMdx(m) {
     "";
 
   const coverRel = (m.relationships || []).find((r) => r.type === "cover_art");
+
   const coverFile =
     coverRel && coverRel.attributes && coverRel.attributes.fileName;
 
@@ -64,8 +65,9 @@ function fmtMdx(m) {
     : "";
 
   const genres = (attr.tags || [])
-    .filter((t) => t.attributes && t.attributes.group === "genre")
-    .map((t) => t.attributes.name.en || "");
+    .filter((t) => t.attributes?.group === "genre")
+    .map((t) => t.attributes?.name?.en)
+    .filter(Boolean);
 
   return {
     id: "mdx:" + m.id,
@@ -97,7 +99,7 @@ function fmtComick(m) {
   const desc = md.desc || md.summary || "";
 
   const genres = (md.md_comic_md_genres || [])
-    .map((g) => g.md_genres && g.md_genres.name)
+    .map((g) => g.md_genres?.name)
     .filter(Boolean);
 
   return {
@@ -114,7 +116,7 @@ function fmtComick(m) {
 }
 
 /* =========================
-   DEDUP
+   REMOVE DUPLICATES
 ========================= */
 
 function dedup(list) {
@@ -133,6 +135,24 @@ function dedup(list) {
 }
 
 /* =========================
+   GENRE MAP (MangaDex)
+========================= */
+
+const GENRES = {
+  action: "391b0423-d847-456f-aff0-8b0cfc03066b",
+  adventure: "87cc87cd-a395-47af-b27a-93258283bbc6",
+  comedy: "4d32cc48-9f00-4cca-9b5a-a839f0764984",
+  drama: "b9af3a63-f058-46de-a9a0-e0c13906197a",
+  fantasy: "cdc58593-87dd-415e-bbc0-2ec27bf404cc",
+  romance: "423e2eae-a7a2-4a8b-ac03-a8351462d71d",
+  horror: "cdad7e68-1419-41dd-bdce-27753074a640",
+  mystery: "ee968100-4191-4968-93d3-f82d72be7e46",
+  scifi: "256c8bd9-4904-4360-bf4f-508a76d67183",
+  sliceoflife: "e5301a23-ebd9-49dd-a0cb-2add944c7fe9",
+  sports: "69964a64-2f90-4d33-beeb-f3ed2875eb4c",
+};
+
+/* =========================
    API HANDLER
 ========================= */
 
@@ -148,7 +168,7 @@ module.exports = async (req, res) => {
 
   try {
     /* =========================
-       HEALTH
+       ROOT
     ========================= */
 
     if (url === "/") {
@@ -166,27 +186,18 @@ module.exports = async (req, res) => {
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
 
-      const [mdxData, ckData] = await Promise.all([
-        mdx(
-          `/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art`
-        ),
-        comick(`/top?page=${page}`),
-      ]);
+      const mdxData = await mdx(
+        `/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art`
+      );
 
-      const mdxMangas = ((mdxData && mdxData.data) || [])
+      const mangas = ((mdxData && mdxData.data) || [])
         .map(fmtMdx)
         .filter(Boolean);
-
-      const ckMangas = ((ckData && ckData.rank) || [])
-        .map(fmtComick)
-        .filter(Boolean);
-
-      const merged = dedup([...mdxMangas, ...ckMangas]);
 
       const totalPages = Math.ceil(((mdxData && mdxData.total) || 200) / 20);
 
       return res.json({
-        mangas: merged,
+        mangas,
         currentPage: page,
         totalPages,
         hasNextPage: page < totalPages,
@@ -210,29 +221,20 @@ module.exports = async (req, res) => {
         });
       }
 
-      const [mdxData, ckData] = await Promise.all([
-        mdx(
-          `/manga?limit=20&offset=${offset}&title=${encodeURIComponent(
-            q
-          )}&includes[]=cover_art`
-        ),
-        comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=20&page=${page}`),
-      ]);
+      const mdxData = await mdx(
+        `/manga?limit=20&offset=${offset}&title=${encodeURIComponent(
+          q
+        )}&includes[]=cover_art`
+      );
 
-      const mdxMangas = ((mdxData && mdxData.data) || [])
+      const mangas = ((mdxData && mdxData.data) || [])
         .map(fmtMdx)
         .filter(Boolean);
-
-      const ckMangas = (Array.isArray(ckData) ? ckData : [])
-        .map(fmtComick)
-        .filter(Boolean);
-
-      const merged = dedup([...mdxMangas, ...ckMangas]);
 
       const totalPages = Math.ceil(((mdxData && mdxData.total) || 20) / 20);
 
       return res.json({
-        mangas: merged,
+        mangas,
         currentPage: page,
         totalPages,
         hasNextPage: page < totalPages,
@@ -248,13 +250,19 @@ module.exports = async (req, res) => {
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
 
-      let mdxUrl = `/manga?limit=20&offset=${offset}&includes[]=cover_art`;
+      const tag = GENRES[genre.toLowerCase()];
 
-      if (genre) {
-        mdxUrl += `&includedTags[]=${genre}`;
+      if (!tag) {
+        return res.json({
+          mangas: [],
+          currentPage: 1,
+          totalPages: 1,
+        });
       }
 
-      const mdxData = await mdx(mdxUrl);
+      const mdxData = await mdx(
+        `/manga?limit=20&offset=${offset}&includedTags[]=${tag}&includes[]=cover_art`
+      );
 
       const mangas = ((mdxData && mdxData.data) || [])
         .map(fmtMdx)
@@ -276,90 +284,57 @@ module.exports = async (req, res) => {
       const id = decodeURIComponent(url.replace("/manga/", ""));
       const lang = params.lang || "en";
 
-      if (id.startsWith("mdx:")) {
-        const mdxId = id.replace("mdx:", "");
-
-        const mangaData = await mdx(`/manga/${mdxId}?includes[]=cover_art`);
-
-        const base = fmtMdx(mangaData.data);
-
-        const feed = await mdx(
-          `/manga/${mdxId}/feed?limit=500&translatedLanguage[]=${lang}`
-        );
-
-        const chapters = ((feed && feed.data) || []).map((c) => ({
-          id: "mdx:" + c.id,
-          name: `Chapter ${c.attributes.chapter || "?"}`,
-          date: c.attributes.publishAt
-            ? c.attributes.publishAt.split("T")[0]
-            : "",
-        }));
-
-        return res.json({
-          ...base,
-          chapters,
-        });
+      if (!id.startsWith("mdx:")) {
+        return res.status(404).json({ error: "Unsupported source" });
       }
 
-      if (id.startsWith("ck:")) {
-        const hid = id.replace("ck:", "");
+      const mdxId = id.replace("mdx:", "");
 
-        const comicData = await comick(`/comic/${hid}`);
+      const mangaData = await mdx(`/manga/${mdxId}?includes[]=cover_art`);
 
-        const chapData = await comick(
-          `/comic/${hid}/chapters?lang=${lang}&limit=9999&page=1`
-        );
+      const base = fmtMdx(mangaData.data);
 
-        const base = fmtComick(comicData.comic || comicData);
+      const feed = await mdx(
+        `/manga/${mdxId}/feed?limit=500&translatedLanguage[]=${lang}`
+      );
 
-        const chapters = ((chapData && chapData.chapters) || []).map((c) => ({
-          id: "ck:" + c.hid,
-          name: `Chapter ${c.chap || "?"}`,
-          date: c.created_at ? c.created_at.split("T")[0] : "",
-        }));
+      const chapters = ((feed && feed.data) || []).map((c) => ({
+        id: "mdx:" + c.id,
+        name: `Chapter ${c.attributes.chapter || "?"}`,
+        date: c.attributes.publishAt
+          ? c.attributes.publishAt.split("T")[0]
+          : "",
+      }));
 
-        return res.json({
-          ...base,
-          chapters,
-        });
-      }
+      return res.json({
+        ...base,
+        chapters,
+      });
     }
 
     /* =========================
-       CHAPTER PAGES
+       CHAPTER
     ========================= */
 
     if (url.startsWith("/chapter/")) {
       const raw = decodeURIComponent(url.replace("/chapter/", ""));
-      const id = raw.replace(/^(mdx:|ck:)/, "");
-      const prefix = raw.startsWith("ck:") ? "ck" : "mdx";
+      const id = raw.replace(/^mdx:/, "");
 
-      if (prefix === "mdx") {
-        const data = await mdx(`/at-home/server/${id}`);
+      const data = await mdx(`/at-home/server/${id}`);
 
-        const base = data.baseUrl;
-        const hash = data.chapter.hash;
-
-        const images = (data.chapter.data || []).map((f, i) => ({
-          img: `${base}/data/${hash}/${f}`,
-          page: i + 1,
-        }));
-
-        return res.json(images);
+      if (!data || !data.chapter) {
+        return res.status(500).json({ error: "Failed to load chapter" });
       }
 
-      if (prefix === "ck") {
-        const data = await comick(`/chapter/${id}`);
+      const base = data.baseUrl;
+      const hash = data.chapter.hash;
 
-        const images = ((data.chapter && data.chapter.md_images) || []).map(
-          (img, i) => ({
-            img: `https://meo.comick.pictures/${img.b2key}`,
-            page: i + 1,
-          })
-        );
+      const images = (data.chapter.data || []).map((f, i) => ({
+        img: `${base}/data/${hash}/${f}`,
+        page: i + 1,
+      }));
 
-        return res.json(images);
-      }
+      return res.json(images);
     }
 
     return res.status(404).json({ error: "Not found" });
