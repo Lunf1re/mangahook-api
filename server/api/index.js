@@ -214,26 +214,60 @@ module.exports = async (req, res) => {
     }
 
     /* ── CHAPTER ──────────────────────────────────────────────── */
-    // Returns DIRECT image URLs (no proxy) for fast browser loading.
-    // Uses the at-home server URL first; dataSaver as client-side fallback.
     if (url.startsWith("/chapter/")) {
       const id   = decodeURIComponent(url.replace("/chapter/", "")).replace(/^mdx:/, "");
       const data = await mdx(`/at-home/server/${id}`);
-
-      if (!data?.chapter) return res.status(500).json({ error:"Failed to load chapter" });
+      if (!data || !data.chapter) return res.status(500).json({ error:"Failed to load chapter" });
 
       const base       = data.baseUrl;
       const hash       = data.chapter.hash;
       const fullFiles  = data.chapter.data || [];
       const saverFiles = data.chapter.dataSaver || [];
+      const host       = "https://" + req.headers.host;
 
-      const images = fullFiles.map((f, i) => ({
-        img:      `${base}/data/${hash}/${f}`,
-        fallback: saverFiles[i] ? `${base}/data-saver/${hash}/${saverFiles[i]}` : null,
-        page:     i + 1,
-      }));
-
+      const images = fullFiles.map((f, i) => {
+        const primary = base + "/data/" + hash + "/" + f;
+        const saver   = saverFiles[i] ? base + "/data-saver/" + hash + "/" + saverFiles[i] : primary;
+        return {
+          img:  host + "/img?u=" + encodeURIComponent(primary) + "&fb=" + encodeURIComponent(saver),
+          page: i + 1,
+        };
+      });
       return res.json(images);
+    }
+
+    /* ── IMAGE PROXY — streaming, zero buffering ──────────────── */
+    if (url.startsWith("/img")) {
+      const imgUrl = p.u  ? decodeURIComponent(p.u)  : "";
+      const fbUrl  = p.fb ? decodeURIComponent(p.fb) : "";
+      if (!imgUrl) return res.status(400).end();
+
+      const HDR = {
+        "Referer":    "https://mangadex.org/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":     "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Origin":     "https://mangadex.org",
+      };
+
+      const tryStream = (target) => http.get(target, { responseType:"stream", timeout:20000, headers:HDR });
+
+      let upstream;
+      try { upstream = await tryStream(imgUrl); }
+      catch {
+        if (!fbUrl) return res.status(502).end();
+        try { upstream = await tryStream(fbUrl); }
+        catch { return res.status(502).end(); }
+      }
+
+      res.setHeader("Content-Type",  upstream.headers["content-type"] || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (upstream.headers["content-length"]) {
+        res.setHeader("Content-Length", upstream.headers["content-length"]);
+      }
+      upstream.data.pipe(res);
+      upstream.data.on("error", () => res.end());
+      return;
     }
 
     return res.status(404).json({ error:"Not found" });
