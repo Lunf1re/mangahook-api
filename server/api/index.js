@@ -1,10 +1,24 @@
 const axios = require('axios');
 
-const BASE = 'https://api.mangadex.org';
+const MDX = 'https://api.mangadex.org';
+const COMICK = 'https://api.comick.fun';
 
-async function api(path) {
-  const r = await axios.get(BASE + path, { timeout: 20000 });
-  return r.data;
+const http = axios.create({ timeout: 15000 });
+
+async function mdx(path) {
+  try {
+    const r = await http.get(MDX + path);
+    return r.data;
+  } catch(e) { return null; }
+}
+
+async function comick(path) {
+  try {
+    const r = await http.get(COMICK + path, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://comick.fun/' }
+    });
+    return r.data;
+  } catch(e) { return null; }
 }
 
 function cors(res) {
@@ -13,62 +27,122 @@ function cors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
 }
 
-function formatManga(m) {
-  const attr = m.attributes;
-  const title = attr.title.en || Object.values(attr.title)[0] || 'Unknown';
+// Format MangaDex manga
+function fmtMdx(m) {
+  if (!m) return null;
+  const attr = m.attributes || {};
+  const title = (attr.title && (attr.title.en || Object.values(attr.title)[0])) || 'Unknown';
   const desc = (attr.description && (attr.description.en || Object.values(attr.description)[0])) || '';
   const coverId = (m.relationships || []).find(r => r.type === 'cover_art');
   const coverFile = coverId && coverId.attributes && coverId.attributes.fileName;
   const image = coverFile ? `https://uploads.mangadex.org/covers/${m.id}/${coverFile}.256.jpg` : '';
-  const genres = (attr.tags || []).filter(t => t.attributes.group === 'genre').map(t => t.attributes.name.en || '');
+  const genres = (attr.tags || []).filter(t => t.attributes && t.attributes.group === 'genre').map(t => t.attributes.name.en || '');
   return {
-    id: m.id,
+    id: 'mdx:' + m.id,
+    _mdxId: m.id,
     title,
     image,
     description: desc.substring(0, 200),
     status: attr.status || '',
     genres,
     latestChapter: attr.lastChapter || '',
-    views: ''
+    views: '',
+    source: 'MangaDex'
   };
+}
+
+// Format ComicK manga
+function fmtComick(m) {
+  if (!m) return null;
+  const md = m.md_comics || m;
+  const title = md.title || md.slug || 'Unknown';
+  const image = md.cover_url || (md.md_covers && md.md_covers[0] && `https://meo.comick.pictures/${md.md_covers[0].b2key}`) || '';
+  const desc = md.desc || md.summary || '';
+  const genres = (md.md_comic_md_genres || []).map(g => g.md_genres && g.md_genres.name).filter(Boolean);
+  return {
+    id: 'ck:' + (md.hid || md.slug),
+    _ckHid: md.hid,
+    _ckSlug: md.slug,
+    title,
+    image,
+    description: desc.substring(0, 200),
+    status: md.status === 1 ? 'ongoing' : md.status === 2 ? 'completed' : '',
+    genres,
+    latestChapter: md.last_chapter ? String(md.last_chapter) : '',
+    views: md.view_count ? String(md.view_count) : '',
+    source: 'ComicK'
+  };
+}
+
+// Deduplicate by title similarity
+function dedup(list) {
+  const seen = new Map();
+  const out = [];
+  for (const m of list) {
+    const key = m.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!seen.has(key)) {
+      seen.set(key, true);
+      out.push(m);
+    }
+  }
+  return out;
 }
 
 module.exports = async (req, res) => {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const url = req.url || '/';
+  const url = (req.url || '/').split('?')[0];
   const params = req.query || {};
 
   try {
-    if (url === '/' || url.startsWith('/?')) {
-      return res.json({ status: 'ok', api: 'manga-api-mangadex' });
-    }
+    // Health
+    if (url === '/') return res.json({ status: 'ok', sources: ['MangaDex', 'ComicK'] });
 
-    if (url.startsWith('/list')) {
+    // /list?page=1
+    if (url === '/list') {
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
-      const data = await api(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&availableTranslatedLanguage[]=en`);
-      const mangas = (data.data || []).map(formatManga);
-      const totalPages = Math.ceil((data.total || 20) / 20);
-      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
+
+      const [mdxData, ckData] = await Promise.all([
+        mdx(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`),
+        comick(`/top?page=${page}&accept_erotic_content=true`)
+      ]);
+
+      const mdxMangas = ((mdxData && mdxData.data) || []).map(fmtMdx).filter(Boolean);
+      const ckMangas = ((Array.isArray(ckData) ? ckData : (ckData && ckData.rank)) || []).map(fmtComick).filter(Boolean);
+
+      const merged = dedup([...mdxMangas, ...ckMangas]);
+      const totalPages = Math.ceil(((mdxData && mdxData.total) || 200) / 20);
+      return res.json({ mangas: merged, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
-    if (url.startsWith('/search')) {
+    // /search?query=...&page=1
+    if (url === '/search') {
       const q = params.query || '';
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
       if (!q) return res.json({ mangas: [], currentPage: 1, totalPages: 1 });
-      const data = await api(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive`);
-      const mangas = (data.data || []).map(formatManga);
-      const totalPages = Math.ceil((data.total || 1) / 20);
-      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
+
+      const [mdxData, ckData] = await Promise.all([
+        mdx(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`),
+        comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=20&page=${page}`)
+      ]);
+
+      const mdxMangas = ((mdxData && mdxData.data) || []).map(fmtMdx).filter(Boolean);
+      const ckMangas = (Array.isArray(ckData) ? ckData : []).map(fmtComick).filter(Boolean);
+
+      const merged = dedup([...mdxMangas, ...ckMangas]);
+      const totalPages = Math.ceil(((mdxData && mdxData.total) || merged.length) / 20);
+      return res.json({ mangas: merged, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
-    if (url.startsWith('/genre')) {
+    // /genre?genre=action&page=1
+    if (url === '/genre') {
       const genre = params.genre || '';
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
+
       const GENRE_IDS = {
         'action': '391b0423-d847-456f-aff0-8b0cfc03066b',
         'adventure': '87cc87cd-a395-47af-b27a-93258283bbc6',
@@ -91,81 +165,124 @@ module.exports = async (req, res) => {
         'shoujo': '155d0d26-5a7b-43c6-8ab5-9b5e17c76b33',
         'ecchi': '2d1f5d56-a1e5-4d0d-a961-2193588b08ec',
       };
-      let apiUrl = `/manga?limit=20&offset=${offset}&includes[]=cover_art&order[followedCount]=desc&contentRating[]=safe&contentRating[]=suggestive&availableTranslatedLanguage[]=en`;
-      if (genre && GENRE_IDS[genre]) apiUrl += `&includedTags[]=${GENRE_IDS[genre]}`;
-      const data = await api(apiUrl);
-      const mangas = (data.data || []).map(formatManga);
-      const totalPages = Math.ceil((data.total || 1) / 20);
-      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
+
+      const CK_GENRES = {
+        'action':1,'adventure':2,'comedy':3,'drama':4,'fantasy':5,'horror':6,
+        'mystery':7,'romance':8,'sci-fi':9,'slice-of-life':10,'sports':11,
+        'supernatural':12,'thriller':13,'martial-arts':14,'historical':15,
+        'shounen':16,'seinen':17,'shoujo':18,'ecchi':19,'school-life':20
+      };
+
+      let mdxUrl = `/manga?limit=20&offset=${offset}&includes[]=cover_art&order[followedCount]=desc&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
+      if (genre && GENRE_IDS[genre]) mdxUrl += `&includedTags[]=${GENRE_IDS[genre]}`;
+
+      let ckUrl = `/v1.0/search?limit=20&page=${page}&sort=follow`;
+      if (genre && CK_GENRES[genre]) ckUrl += `&genre=${CK_GENRES[genre]}`;
+
+      const [mdxData, ckData] = await Promise.all([mdx(mdxUrl), comick(ckUrl)]);
+
+      const mdxMangas = ((mdxData && mdxData.data) || []).map(fmtMdx).filter(Boolean);
+      const ckMangas = (Array.isArray(ckData) ? ckData : []).map(fmtComick).filter(Boolean);
+
+      const merged = dedup([...mdxMangas, ...ckMangas]);
+      const totalPages = Math.ceil(((mdxData && mdxData.total) || 200) / 20);
+      return res.json({ mangas: merged, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
+    // /manga/:id — works for both mdx:xxx and ck:xxx
     if (url.startsWith('/manga/')) {
-      const id = url.replace('/manga/', '').split('?')[0];
+      const id = url.replace('/manga/', '');
       const lang = params.lang || 'en';
 
-      // Fetch manga details
-      const mangaData = await api(`/manga/${id}?includes[]=cover_art`);
-      const base = formatManga(mangaData.data);
+      if (id.startsWith('mdx:')) {
+        const mdxId = id.replace('mdx:', '');
+        const mangaData = await mdx(`/manga/${mdxId}?includes[]=cover_art`);
+        if (!mangaData) return res.status(404).json({ error: 'Not found' });
+        const base = fmtMdx(mangaData.data);
 
-      // Fetch ALL chapters by paginating
-      let allChapters = [];
-      let offset = 0;
-      const limit = 500;
-      while (true) {
-        const chapData = await api(`/manga/${id}/feed?limit=${limit}&offset=${offset}&order[chapter]=asc&translatedLanguage[]=${lang}`);
-        const batch = chapData.data || [];
-        allChapters = allChapters.concat(batch);
-        if (allChapters.length >= chapData.total || batch.length < limit) break;
-        offset += limit;
+        // Fetch ALL chapters
+        let allChapters = [];
+        let offset = 0;
+        while (true) {
+          const batch = await mdx(`/manga/${mdxId}/feed?limit=500&offset=${offset}&order[chapter]=asc&translatedLanguage[]=${lang}&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`);
+          if (!batch || !batch.data || batch.data.length === 0) break;
+          allChapters = allChapters.concat(batch.data);
+          if (allChapters.length >= batch.total) break;
+          offset += 500;
+        }
+
+        // Deduplicate chapters by number
+        const seen = new Map();
+        for (const c of allChapters) {
+          const num = c.attributes.chapter || '?';
+          if (!seen.has(num)) seen.set(num, c);
+        }
+        const chapters = Array.from(seen.values())
+          .sort((a, b) => parseFloat(b.attributes.chapter || 0) - parseFloat(a.attributes.chapter || 0))
+          .map(c => ({
+            id: 'mdx:' + c.id,
+            name: `Chapter ${c.attributes.chapter || '?'}${c.attributes.title ? ' - ' + c.attributes.title : ''}`,
+            date: c.attributes.publishAt ? c.attributes.publishAt.split('T')[0] : ''
+          }));
+
+        return res.json({ ...base, chapters });
+
+      } else if (id.startsWith('ck:')) {
+        const hid = id.replace('ck:', '');
+        const [comicData, chapData] = await Promise.all([
+          comick(`/comic/${hid}`),
+          comick(`/comic/${hid}/chapters?lang=${lang}&limit=9999&page=1`)
+        ]);
+
+        if (!comicData) return res.status(404).json({ error: 'Not found' });
+        const base = fmtComick(comicData.comic || comicData);
+
+        const rawChaps = (chapData && chapData.chapters) || [];
+        const seen = new Map();
+        for (const c of rawChaps) {
+          const num = c.chap || '?';
+          if (!seen.has(num)) seen.set(num, c);
+        }
+        const chapters = Array.from(seen.values())
+          .sort((a, b) => parseFloat(b.chap || 0) - parseFloat(a.chap || 0))
+          .map(c => ({
+            id: 'ck:' + c.hid,
+            name: `Chapter ${c.chap || '?'}${c.title ? ' - ' + c.title : ''}`,
+            date: c.created_at ? c.created_at.split('T')[0] : ''
+          }));
+
+        return res.json({ ...base, chapters });
       }
 
-      // Deduplicate by chapter number, keep first scanlation
-      const seen = new Map();
-      for (const c of allChapters) {
-        const num = c.attributes.chapter || '?';
-        if (!seen.has(num)) seen.set(num, c);
-      }
-
-      const chapters = Array.from(seen.values())
-        .sort((a, b) => parseFloat(b.attributes.chapter || 0) - parseFloat(a.attributes.chapter || 0))
-        .map(c => ({
-          id: c.id,
-          name: `Chapter ${c.attributes.chapter || '?'}${c.attributes.title ? ' - ' + c.attributes.title : ''}`,
-          date: c.attributes.publishAt ? c.attributes.publishAt.split('T')[0] : ''
-        }));
-
-      return res.json({ ...base, chapters });
+      return res.status(404).json({ error: 'Unknown manga source' });
     }
 
+    // /chapter/:id — works for both mdx:xxx and ck:xxx
     if (url.startsWith('/chapter/')) {
-      const parts = url.replace('/chapter/', '').split('?')[0].split('/');
-      const chapterId = parts[parts.length - 1];
-      const data = await api(`/at-home/server/${chapterId}`);
-      const base = data.baseUrl;
-      const hash = data.chapter.hash;
-      const images = (data.chapter.data || []).map((f, i) => ({
-        img: `${base}/data/${hash}/${f}`,
-        page: i + 1
-      }));
-      return res.json(images);
-    }
+      const raw = url.replace('/chapter/', '');
+      // Handle mdx:id/ck:id (strip prefixes)
+      const id = raw.replace(/^(mdx:|ck:)/, '');
+      const prefix = raw.startsWith('ck:') ? 'ck' : 'mdx';
 
-    // GET /languages/:id — list available languages for a manga
-    if (url.startsWith('/languages/')) {
-      const id = url.replace('/languages/', '').split('?')[0];
-      const data = await api(`/manga/${id}/aggregate`);
-      const langs = Object.keys(data.volumes || {}).length
-        ? ['en'] // fallback
-        : ['en'];
-      // Better: get from feed
-      const feed = await api(`/manga/${id}/feed?limit=1&order[chapter]=asc`);
-      const allLangs = new Set();
-      // fetch available langs via aggregate endpoint
-      const agg = await api(`/manga/${id}/aggregate?translatedLanguage[]=en&translatedLanguage[]=ja&translatedLanguage[]=fr&translatedLanguage[]=es&translatedLanguage[]=de&translatedLanguage[]=pt-br&translatedLanguage[]=ru&translatedLanguage[]=ko&translatedLanguage[]=zh`);
-      ['en','ja','fr','es','de','pt-br','ru','ko','zh'].forEach(l => {
-        if (agg.volumes && Object.keys(agg.volumes).length > 0) allLangs.add(l);
-      });
-      return res.json({ languages: Array.from(allLangs) });
+      if (prefix === 'mdx') {
+        const data = await mdx(`/at-home/server/${id}`);
+        if (!data) return res.status(500).json({ error: 'Failed to load chapter' });
+        const base = data.baseUrl;
+        const hash = data.chapter.hash;
+        const images = (data.chapter.data || []).map((f, i) => ({
+          img: `${base}/data/${hash}/${f}`,
+          page: i + 1
+        }));
+        return res.json(images);
+      } else {
+        const data = await comick(`/chapter/${id}`);
+        if (!data) return res.status(500).json({ error: 'Failed to load chapter' });
+        const images = ((data.chapter && data.chapter.md_images) || []).map((img, i) => ({
+          img: `https://meo.comick.pictures/${img.b2key}`,
+          page: i + 1
+        }));
+        return res.json(images);
+      }
     }
 
     return res.status(404).json({ error: 'Not found' });
