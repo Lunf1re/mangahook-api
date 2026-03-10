@@ -3,10 +3,17 @@ const cheerio = require('cheerio');
 
 const BASE = 'https://manganato.com';
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Referer': 'https://manganato.com/',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.5',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Upgrade-Insecure-Requests': '1',
 };
 
 async function get(url) {
@@ -28,12 +35,10 @@ module.exports = async (req, res) => {
   const params = req.query || {};
 
   try {
-    // Health check
     if (url === '/' || url.startsWith('/?')) {
       return res.json({ status: 'ok', api: 'manga-api' });
     }
 
-    // /list?page=1&type=topview
     if (url.startsWith('/list')) {
       const page = params.page || 1;
       const type = params.type || 'topview';
@@ -57,7 +62,6 @@ module.exports = async (req, res) => {
       return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
     }
 
-    // /search?query=naruto&page=1
     if (url.startsWith('/search')) {
       const q = (params.query || '').replace(/\s+/g, '-').toLowerCase();
       const page = params.page || 1;
@@ -81,7 +85,6 @@ module.exports = async (req, res) => {
       return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
     }
 
-    // /genre?genre=action&page=1
     if (url.startsWith('/genre')) {
       const genre = params.genre || 'action';
       const page = params.page || 1;
@@ -106,7 +109,6 @@ module.exports = async (req, res) => {
       return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
     }
 
-    // /manga/manga-id
     if (url.startsWith('/manga/')) {
       const id = url.replace('/manga/', '').split('?')[0];
       const $ = await get(`${BASE}/${id}`);
@@ -126,7 +128,6 @@ module.exports = async (req, res) => {
       return res.json({ id, title, image, description, status, genres, chapters });
     }
 
-    // /chapter/manga-id/chapter-x
     if (url.startsWith('/chapter/')) {
       const parts = url.replace('/chapter/', '').split('?')[0].split('/');
       const mangaId = parts[0];
