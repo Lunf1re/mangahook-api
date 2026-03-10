@@ -289,7 +289,7 @@ module.exports = async (req, res) => {
       const prefix = raw.startsWith("ck:") ? "ck" : "mdx";
       const id     = raw.replace(/^(mdx:|ck:)/, "");
 
-      /* ComicK chapters */
+      /* ComicK chapters — direct CDN, no issues */
       if (prefix === "ck") {
         const data = await comick(`/chapter/${id}`);
         const images = ((data && data.chapter && data.chapter.md_images) || []).map((img, i) => ({
@@ -299,88 +299,28 @@ module.exports = async (req, res) => {
         return res.json(images);
       }
 
-      /* MangaDex chapters — retry until we get a healthy CDN node */
-      let data = null;
-      let base, hash, fullFiles, saverFiles;
+      /* MangaDex chapters
+         Key insight: always use uploads.mangadex.org as base.
+         The at-home /at-home/server/ API sometimes returns volatile
+         volunteer CDN nodes that 404. uploads.mangadex.org is the
+         stable, permanent MangaDex-owned server that always works.
+      */
+      const data = await mdx(`/at-home/server/${id}`);
+      if (!data || !data.chapter) return res.status(500).json({ error:"Failed to load chapter" });
 
-      for (let attempt = 0; attempt < 4; attempt++) {
-        data = await mdx(`/at-home/server/${id}`);
-        if (!data || !data.chapter) break;
+      const STABLE_BASE = "https://uploads.mangadex.org";
+      const hash        = data.chapter.hash;
+      const fullFiles   = data.chapter.data || [];
+      const saverFiles  = data.chapter.dataSaver || [];
 
-        base       = data.baseUrl;
-        hash       = data.chapter.hash;
-        fullFiles  = data.chapter.data || [];
-        saverFiles = data.chapter.dataSaver || [];
+      const images = fullFiles.map((f, i) => ({
+        // Always use stable uploads.mangadex.org — never the volatile at-home node
+        img:      `${STABLE_BASE}/data/${hash}/${f}`,
+        fallback: saverFiles[i] ? `${STABLE_BASE}/data-saver/${hash}/${saverFiles[i]}` : null,
+        page:     i + 1,
+      }));
 
-        // Quick HEAD check on the first image to verify this CDN node works
-        if (fullFiles.length > 0) {
-          try {
-            const testUrl = `${base}/data/${hash}/${fullFiles[0]}`;
-            const check   = await http.head(testUrl, {
-              timeout: 5000,
-              headers: { "Referer": "https://mangadex.org/" },
-            });
-            if (check.status === 200) break; // Good node found
-          } catch { /* node is bad, retry */ }
-        } else {
-          break;
-        }
-
-        // Small delay before retry so MangaDex returns a different node
-        await new Promise(r => setTimeout(r, 300));
-      }
-
-      if (!data || !data.chapter || !fullFiles || fullFiles.length === 0) {
-        return res.status(500).json({ error: "Failed to load chapter pages" });
-      }
-
-      const host   = "https://" + req.headers.host;
-      const images = fullFiles.map((f, i) => {
-        const primary = `${base}/data/${hash}/${f}`;
-        const saver   = saverFiles[i] ? `${base}/data-saver/${hash}/${saverFiles[i]}` : primary;
-        return {
-          img:  `${host}/img?u=${encodeURIComponent(primary)}&fb=${encodeURIComponent(saver)}`,
-          page: i + 1,
-        };
-      });
       return res.json(images);
-    }
-
-    /* ── IMAGE PROXY — streaming, zero buffering ──────────────── */
-    if (url.startsWith("/img")) {
-      const imgUrl = p.u  ? decodeURIComponent(p.u)  : "";
-      const fbUrl  = p.fb ? decodeURIComponent(p.fb) : "";
-      if (!imgUrl) return res.status(400).end();
-
-      const HDR = {
-        "Referer":    "https://mangadex.org/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":     "image/webp,image/apng,image/*,*/*;q=0.8",
-        "Origin":     "https://mangadex.org",
-      };
-
-      const tryStream = (target) => http.get(target, { responseType:"stream", timeout:20000, headers:HDR });
-
-      let upstream;
-      try { upstream = await tryStream(imgUrl); }
-      catch {
-        if (!fbUrl) return res.status(502).end();
-        try { upstream = await tryStream(fbUrl); }
-        catch { return res.status(502).end(); }
-      }
-
-      // If status is not 2xx, try fallback
-      if (upstream.status && upstream.status >= 400 && fbUrl) {
-        try { upstream = await tryStream(fbUrl); } catch { return res.status(502).end(); }
-      }
-
-      res.setHeader("Content-Type",  upstream.headers["content-type"] || "image/jpeg");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      if (upstream.headers["content-length"]) res.setHeader("Content-Length", upstream.headers["content-length"]);
-      upstream.data.pipe(res);
-      upstream.data.on("error", () => res.end());
-      return;
     }
 
     return res.status(404).json({ error:"Not found" });
