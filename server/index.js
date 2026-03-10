@@ -231,27 +231,40 @@ module.exports = async (req, res) => {
 
       /* ComicK manga detail */
       if (rawId.startsWith("ck:")) {
-        const hid      = rawId.replace("ck:", "");
+        const hid = rawId.replace("ck:", "");
         const [comicData, chapData] = await Promise.all([
           comick(`/comic/${hid}`),
-          comick(`/comic/${hid}/chapters?lang=${lang}&limit=300&page=1`),
+          comick(`/comic/${hid}/chapters?lang=${lang}&limit=500&page=1`),
         ]);
-        const base     = fmtCk((comicData && (comicData.comic || comicData)));
+        const base = fmtCk((comicData && (comicData.comic || comicData)));
         if (!base) return res.status(404).json({ error:"Manga not found" });
-        const chapters = ((chapData && chapData.chapters) || []).map(c => ({
+
+        let chapters = ((chapData && chapData.chapters) || []).map(c => ({
           id:   "ck:" + c.hid,
           name: "Chapter " + (c.chap || "?"),
           date: c.created_at ? c.created_at.split("T")[0] : "",
           lang: lang,
         }));
-        return res.json({ ...base, chapters, chapterPages:1 });
+
+        // If no chapters for requested lang, try without lang filter
+        if (chapters.length === 0) {
+          const allChaps = await comick(`/comic/${hid}/chapters?limit=500&page=1`);
+          chapters = ((allChaps && allChaps.chapters) || []).map(c => ({
+            id:   "ck:" + c.hid,
+            name: "Chapter " + (c.chap || "?"),
+            date: c.created_at ? c.created_at.split("T")[0] : "",
+            lang: c.lang || "",
+          }));
+        }
+
+        return res.json({ ...base, chapters, chapterPages: 1 });
       }
 
       /* MangaDex manga detail */
       const id = rawId.replace(/^mdx:/, "");
       const [mangaData, feed] = await Promise.all([
         mdx(`/manga/${id}?includes[]=cover_art`),
-        mdx(`/manga/${id}/feed?limit=100&offset=${offset}&order[chapter]=desc&translatedLanguage[]=${lang}`),
+        mdx(`/manga/${id}/feed?limit=500&offset=${offset}&order[chapter]=desc&translatedLanguage[]=${lang}`),
       ]);
 
       const base = fmt(mangaData && mangaData.data);
@@ -266,7 +279,7 @@ module.exports = async (req, res) => {
 
       // No chapters in requested lang → fall back to ALL languages
       if (chapters.length === 0) {
-        const all = await mdx(`/manga/${id}/feed?limit=100&offset=${offset}&order[chapter]=desc`);
+        const all = await mdx(`/manga/${id}/feed?limit=500&offset=${offset}&order[chapter]=desc`);
         chapters = ((all && all.data) || []).map(c => ({
           id:   "mdx:" + c.id,
           name: "Chapter " + (c.attributes.chapter || "?"),
@@ -292,10 +305,17 @@ module.exports = async (req, res) => {
       /* ComicK chapters — direct CDN, no issues */
       if (prefix === "ck") {
         const data = await comick(`/chapter/${id}`);
-        const images = ((data && data.chapter && data.chapter.md_images) || []).map((img, i) => ({
-          img:  `https://meo.comick.pictures/${img.b2key}`,
+        if (!data) return res.status(500).json({ error:"Failed to load chapter" });
+
+        // ComicK can return images in different structures
+        const chap = data.chapter || data;
+        const imgs = chap.md_images || chap.images || data.images || [];
+
+        const images = imgs.map((img, i) => ({
+          img:  `https://meo.comick.pictures/${img.b2key || img.name || img}`,
           page: i + 1,
-        }));
+        })).filter(x => x.img && !x.img.endsWith("/"));
+
         return res.json(images);
       }
 
