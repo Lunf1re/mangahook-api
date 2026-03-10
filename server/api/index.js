@@ -1,30 +1,36 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 
-const BASE = 'https://manganato.com';
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Referer': 'https://manganato.com/',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Upgrade-Insecure-Requests': '1',
-};
+const BASE = 'https://api.mangadex.org';
 
-async function get(url) {
-  const r = await axios.get(url, { headers: HEADERS, timeout: 20000 });
-  return cheerio.load(r.data);
+async function api(path) {
+  const r = await axios.get(BASE + path, { timeout: 20000 });
+  return r.data;
 }
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+}
+
+function formatManga(m) {
+  const attr = m.attributes;
+  const title = attr.title.en || Object.values(attr.title)[0] || 'Unknown';
+  const desc = (attr.description && (attr.description.en || Object.values(attr.description)[0])) || '';
+  const coverId = (m.relationships || []).find(r => r.type === 'cover_art');
+  const coverFile = coverId && coverId.attributes && coverId.attributes.fileName;
+  const image = coverFile ? `https://uploads.mangadex.org/covers/${m.id}/${coverFile}.256.jpg` : '';
+  const genres = (attr.tags || []).filter(t => t.attributes.group === 'genre').map(t => t.attributes.name.en || '');
+  return {
+    id: m.id,
+    title,
+    image,
+    description: desc.substring(0, 200),
+    status: attr.status || '',
+    genres,
+    latestChapter: attr.lastChapter || '',
+    views: ''
+  };
 }
 
 module.exports = async (req, res) => {
@@ -36,108 +42,99 @@ module.exports = async (req, res) => {
 
   try {
     if (url === '/' || url.startsWith('/?')) {
-      return res.json({ status: 'ok', api: 'manga-api' });
+      return res.json({ status: 'ok', api: 'manga-api-mangadex' });
     }
 
+    // /list?page=1
     if (url.startsWith('/list')) {
-      const page = params.page || 1;
-      const type = params.type || 'topview';
-      const $ = await get(`${BASE}/genre-all/${page}?type=${type}`);
-      const mangas = [];
-      $('.content-genres-item').each((i, el) => {
-        const a = $(el).find('.genres-item-name');
-        const img = $(el).find('img');
-        const chap = $(el).find('.genres-item-chap');
-        mangas.push({
-          id: a.attr('href') ? a.attr('href').split('/').pop() : '',
-          title: a.text().trim(),
-          image: img.attr('src') || img.attr('data-src') || '',
-          latestChapter: chap.first().text().trim(),
-          description: $(el).find('.genres-item-info').text().trim().substring(0, 200),
-          genres: [],
-          views: $(el).find('.genres-item-view').text().trim()
-        });
-      });
-      const totalPages = parseInt($('.page-last').text().replace(/[^0-9]/g, '')) || 1;
-      return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
+      const page = Math.max(1, parseInt(params.page) || 1);
+      const offset = (page - 1) * 20;
+      const data = await api(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&availableTranslatedLanguage[]=en`);
+      const mangas = (data.data || []).map(formatManga);
+      const totalPages = Math.ceil((data.total || 20) / 20);
+      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
+    // /search?query=naruto&page=1
     if (url.startsWith('/search')) {
-      const q = (params.query || '').replace(/\s+/g, '-').toLowerCase();
-      const page = params.page || 1;
+      const q = params.query || '';
+      const page = Math.max(1, parseInt(params.page) || 1);
+      const offset = (page - 1) * 20;
       if (!q) return res.json({ mangas: [], currentPage: 1, totalPages: 1 });
-      const $ = await get(`https://manganato.com/search/story/${q}?page=${page}`);
-      const mangas = [];
-      $('.search-story-item').each((i, el) => {
-        const a = $(el).find('.item-title');
-        const img = $(el).find('img');
-        mangas.push({
-          id: a.attr('href') ? a.attr('href').split('/').pop() : '',
-          title: a.text().trim(),
-          image: img.attr('src') || img.attr('data-src') || '',
-          latestChapter: $(el).find('.item-chapter').first().text().trim(),
-          description: '',
-          genres: [],
-          views: $(el).find('.item-time').text().trim()
-        });
-      });
-      const totalPages = parseInt($('.page-last').text().replace(/[^0-9]/g, '')) || 1;
-      return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
+      const data = await api(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive`);
+      const mangas = (data.data || []).map(formatManga);
+      const totalPages = Math.ceil((data.total || 1) / 20);
+      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
+    // /genre?genre=action&page=1
     if (url.startsWith('/genre')) {
-      const genre = params.genre || 'action';
-      const page = params.page || 1;
-      const type = params.type || 'topview';
-      const $ = await get(`${BASE}/genre-${genre}/${page}?type=${type}`);
-      const mangas = [];
-      $('.content-genres-item').each((i, el) => {
-        const a = $(el).find('.genres-item-name');
-        const img = $(el).find('img');
-        const chap = $(el).find('.genres-item-chap');
-        mangas.push({
-          id: a.attr('href') ? a.attr('href').split('/').pop() : '',
-          title: a.text().trim(),
-          image: img.attr('src') || img.attr('data-src') || '',
-          latestChapter: chap.first().text().trim(),
-          description: '',
-          genres: [],
-          views: $(el).find('.genres-item-view').text().trim()
-        });
-      });
-      const totalPages = parseInt($('.page-last').text().replace(/[^0-9]/g, '')) || 1;
-      return res.json({ mangas, currentPage: Number(page), totalPages, hasNextPage: Number(page) < totalPages });
+      const genre = params.genre || '';
+      const page = Math.max(1, parseInt(params.page) || 1);
+      const offset = (page - 1) * 20;
+
+      // MangaDex genre tag IDs
+      const GENRE_IDS = {
+        'action': '391b0423-d847-456f-aff0-8b0cfc03066b',
+        'adventure': '87cc87cd-a395-47af-b27a-93258283bbc6',
+        'comedy': '4d32cc48-9f00-4cca-9b5a-a839f0764984',
+        'drama': 'b9af3a63-f058-46de-a9a0-e0c13906197a',
+        'fantasy': 'cdc58593-87dd-415e-bbc0-2ec27bf404cc',
+        'horror': 'cdad7e68-1419-41dd-bdce-27753074a640',
+        'mystery': 'ee968100-4191-4968-93d3-f68d863pak',
+        'romance': '423e2eae-a7a2-4a8b-ac03-a8351462d71d',
+        'sci-fi': '256c8bd9-4904-4360-bf4f-508a76d67183',
+        'slice-of-life': 'e5301a23-ebd9-49dd-a0cb-2add944c7fe9',
+        'sports': '69964a64-2f90-4d33-beeb-107651b6c03a',
+        'supernatural': 'eabc5b4c-6aff-42f3-b657-3e90cbd00b75',
+        'thriller': '07251805-a27e-4d59-b488-f0bfbec15168',
+        'martial-arts': '799c202e-7daa-44eb-9cf7-8a3c0441531e',
+        'historical': '33771934-028e-4cb3-8744-691e866a923e',
+        'school-life': 'caaa44eb-cd40-4177-b930-79d3ef2afe87',
+        'shounen': '27564bd6-d1af-45b7-bba7-e28b0be0e62a',
+        'seinen': 'a3c67850-4684-404e-9b7f-c69850ee5da6',
+        'shoujo': '155d0d26-5a7b-43c6-8ab5-9b5e17c76b33',
+        'ecchi': '2d1f5d56-a1e5-4d0d-a961-2193588b08ec',
+      };
+
+      let apiUrl = `/manga?limit=20&offset=${offset}&includes[]=cover_art&order[followedCount]=desc&contentRating[]=safe&contentRating[]=suggestive&availableTranslatedLanguage[]=en`;
+      if (genre && GENRE_IDS[genre]) {
+        apiUrl += `&includedTags[]=${GENRE_IDS[genre]}`;
+      }
+      const data = await api(apiUrl);
+      const mangas = (data.data || []).map(formatManga);
+      const totalPages = Math.ceil((data.total || 1) / 20);
+      return res.json({ mangas, currentPage: page, totalPages, hasNextPage: page < totalPages });
     }
 
+    // /manga/:id
     if (url.startsWith('/manga/')) {
       const id = url.replace('/manga/', '').split('?')[0];
-      const $ = await get(`${BASE}/${id}`);
-      const title = $('.story-info-right h1').text().trim();
-      const image = $('.story-info-left img').attr('src') || '';
-      const description = $('#panel-story-info-description').text().replace('Description :', '').trim();
-      const status = $('.table-value').eq(2).text().trim();
-      const genres = [];
-      $('.table-value').eq(3).find('a').each((i, el) => genres.push($(el).text().trim()));
-      const chapters = [];
-      $('.row-content-chapter li').each((i, el) => {
-        const a = $(el).find('a');
-        const href = a.attr('href') || '';
-        const chapId = href.split('/').slice(-2).join('/');
-        chapters.push({ id: chapId, name: a.text().trim(), date: $(el).find('span').last().text().trim() });
-      });
-      return res.json({ id, title, image, description, status, genres, chapters });
+      const [mangaData, chapData] = await Promise.all([
+        api(`/manga/${id}?includes[]=cover_art`),
+        api(`/manga/${id}/feed?limit=96&order[chapter]=desc&translatedLanguage[]=en`)
+      ]);
+      const m = mangaData.data;
+      const base = formatManga(m);
+      const chapters = (chapData.data || []).map(c => ({
+        id: c.id,
+        name: `Chapter ${c.attributes.chapter || '?'}${c.attributes.title ? ' - ' + c.attributes.title : ''}`,
+        date: c.attributes.publishAt ? c.attributes.publishAt.split('T')[0] : ''
+      }));
+      return res.json({ ...base, chapters });
     }
 
+    // /chapter/:chapterId (MangaDex chapter id only)
     if (url.startsWith('/chapter/')) {
       const parts = url.replace('/chapter/', '').split('?')[0].split('/');
-      const mangaId = parts[0];
-      const chapterId = parts[1];
-      const $ = await get(`https://chapmanganato.to/${mangaId}/${chapterId}`);
-      const images = [];
-      $('.container-chapter-reader img').each((i, el) => {
-        const src = $(el).attr('src') || $(el).attr('data-src') || '';
-        if (src) images.push({ img: src, page: i + 1 });
-      });
+      const chapterId = parts[parts.length - 1];
+      const data = await api(`/at-home/server/${chapterId}`);
+      const base = data.baseUrl;
+      const hash = data.chapter.hash;
+      const images = (data.chapter.data || []).map((f, i) => ({
+        img: `${base}/data/${hash}/${f}`,
+        page: i + 1
+      }));
       return res.json(images);
     }
 
