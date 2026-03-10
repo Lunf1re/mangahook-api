@@ -3,7 +3,7 @@ const axios = require("axios");
 const MDX = "https://api.mangadex.org";
 
 const http = axios.create({
-  timeout: 12000
+  timeout: 15000
 });
 
 /* ======================
@@ -14,7 +14,7 @@ async function mdx(path) {
   try {
     const r = await http.get(MDX + path);
     return r.data;
-  } catch {
+  } catch (e) {
     return null;
   }
 }
@@ -22,10 +22,10 @@ async function mdx(path) {
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "*");
+
+  /* caching for speed */
+  res.setHeader("Cache-Control", "public, s-maxage=120, stale-while-revalidate=300");
 }
 
 /* ======================
@@ -38,21 +38,21 @@ function fmtMdx(m) {
   const attr = m.attributes || {};
 
   const title =
-    (attr.title && (attr.title.en || Object.values(attr.title)[0])) ||
+    attr.title?.en ||
+    Object.values(attr.title || {})[0] ||
     "Unknown";
 
   const desc =
-    (attr.description &&
-      (attr.description.en || Object.values(attr.description)[0])) ||
+    attr.description?.en ||
+    Object.values(attr.description || {})[0] ||
     "";
 
   const coverRel = (m.relationships || []).find(r => r.type === "cover_art");
 
-  const coverFile =
-    coverRel && coverRel.attributes && coverRel.attributes.fileName;
+  const coverFile = coverRel?.attributes?.fileName;
 
   const image = coverFile
-    ? `https://uploads.mangadex.org/covers/${m.id}/${coverFile}.256.jpg`
+    ? `https://uploads.mangadex.org/covers/${m.id}/${coverFile}.512.jpg`
     : "";
 
   const genres = (attr.tags || [])
@@ -73,7 +73,7 @@ function fmtMdx(m) {
 }
 
 /* ======================
-   GENRES
+   GENRES (FULL LIST)
 ====================== */
 
 const GENRES = {
@@ -86,7 +86,17 @@ const GENRES = {
   horror: "cdad7e68-1419-41dd-bdce-27753074a640",
   mystery: "ee968100-4191-4968-93d3-f82d72be7e46",
   scifi: "256c8bd9-4904-4360-bf4f-508a76d67183",
-  sliceoflife: "e5301a23-ebd9-49dd-a0cb-2add944c7fe9"
+  sliceoflife: "e5301a23-ebd9-49dd-a0cb-2add944c7fe9",
+  sports: "69964a64-2f90-4d33-beeb-f3ed2875eb4c",
+  supernatural: "eabc5b4c-6aff-42f3-b657-3e90cbd00b75",
+  thriller: "07251805-a27e-4d59-b488-f0bfbec15168",
+  psychological: "3b60b75c-a2d7-4860-ab56-05f391bb889c",
+  historical: "33771934-028e-4cb3-8744-691e866a923e",
+  martialarts: "799c202e-7daa-44eb-9cf7-8a3c0441531e",
+  mecha: "50880a9d-5440-4732-9afb-8f457127e836",
+  isekai: "ace04997-f6bd-436e-b261-779182193d3d",
+  tragedy: "f8f62932-27da-4fe4-8ee1-6779a8c5edba",
+  vampires: "9438db5a-7e2a-4ac0-b39e-e0d95a34b8a8"
 };
 
 /* ======================
@@ -113,6 +123,7 @@ module.exports = async (req, res) => {
     if (url === "/") {
       return res.json({
         status: "ok",
+        api: "MangaHook",
         source: "MangaDex"
       });
     }
@@ -130,11 +141,11 @@ module.exports = async (req, res) => {
         `/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art`
       );
 
-      const mangas = ((data && data.data) || [])
+      const mangas = (data?.data || [])
         .map(fmtMdx)
         .filter(Boolean);
 
-      const totalPages = Math.ceil(((data && data.total) || 200) / 20);
+      const totalPages = Math.ceil((data?.total || 200) / 20);
 
       return res.json({
         mangas,
@@ -163,16 +174,14 @@ module.exports = async (req, res) => {
       }
 
       const data = await mdx(
-        `/manga?limit=20&offset=${offset}&title=${encodeURIComponent(
-          q
-        )}&includes[]=cover_art`
+        `/manga?title=${encodeURIComponent(q)}&limit=20&offset=${offset}&includes[]=cover_art`
       );
 
-      const mangas = ((data && data.data) || [])
+      const mangas = (data?.data || [])
         .map(fmtMdx)
         .filter(Boolean);
 
-      const totalPages = Math.ceil(((data && data.total) || 20) / 20);
+      const totalPages = Math.ceil((data?.total || 20) / 20);
 
       return res.json({
         mangas,
@@ -188,11 +197,11 @@ module.exports = async (req, res) => {
 
     if (url.startsWith("/genre")) {
 
-      const genre = params.genre || "";
+      const genre = params.genre?.toLowerCase();
+      const tag = GENRES[genre];
+
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
-
-      const tag = GENRES[genre.toLowerCase()];
 
       if (!tag) {
         return res.json({
@@ -203,10 +212,10 @@ module.exports = async (req, res) => {
       }
 
       const data = await mdx(
-        `/manga?limit=20&offset=${offset}&includedTags[]=${tag}&includes[]=cover_art`
+        `/manga?includedTags[]=${tag}&limit=20&offset=${offset}&includes[]=cover_art`
       );
 
-      const mangas = ((data && data.data) || [])
+      const mangas = (data?.data || [])
         .map(fmtMdx)
         .filter(Boolean);
 
@@ -226,7 +235,6 @@ module.exports = async (req, res) => {
 
       const id = decodeURIComponent(url.replace("/manga/", ""));
       const page = Math.max(1, parseInt(params.page) || 1);
-      const offset = (page - 1) * 100;
 
       const mdxId = id.replace("mdx:", "");
 
@@ -235,15 +243,13 @@ module.exports = async (req, res) => {
       const base = fmtMdx(mangaData?.data);
 
       const feed = await mdx(
-        `/manga/${mdxId}/feed?limit=100&offset=${offset}&order[chapter]=desc`
+        `/manga/${mdxId}/feed?limit=100&offset=${(page - 1) * 100}&order[chapter]=desc`
       );
 
-      const chapters = ((feed && feed.data) || []).map(c => ({
+      const chapters = (feed?.data || []).map(c => ({
         id: "mdx:" + c.id,
         name: `Chapter ${c.attributes.chapter || "?"}`,
-        date: c.attributes.publishAt
-          ? c.attributes.publishAt.split("T")[0]
-          : ""
+        date: c.attributes.publishAt?.split("T")[0] || ""
       }));
 
       const total = feed?.total || 0;
@@ -266,15 +272,22 @@ module.exports = async (req, res) => {
 
       const data = await mdx(`/at-home/server/${id}`);
 
-      if (!data || !data.chapter) {
-        return res.status(500).json({ error: "Failed to load chapter" });
+      if (!data?.chapter) {
+        return res.status(500).json({ error: "Chapter not available" });
       }
 
       const base = data.baseUrl;
       const hash = data.chapter.hash;
 
-      const images = (data.chapter.dataSaver || []).map((f, i) => ({
-        img: `${base}/data-saver/${hash}/${f}`,
+      const saver = data.chapter.dataSaver || [];
+      const full = data.chapter.data || [];
+
+      const files = saver.length ? saver : full;
+
+      const images = files.map((f, i) => ({
+        img: saver.length
+          ? `${base}/data-saver/${hash}/${f}`
+          : `${base}/data/${hash}/${f}`,
         page: i + 1
       }));
 
@@ -284,8 +297,11 @@ module.exports = async (req, res) => {
     return res.status(404).json({ error: "Not found" });
 
   } catch (e) {
+
     return res.status(500).json({
-      error: e.message
+      error: "Server error",
+      message: e.message
     });
+
   }
 };
