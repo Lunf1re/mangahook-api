@@ -3,7 +3,7 @@ const axios = require("axios");
 const MDX = "https://api.mangadex.org";
 
 const http = axios.create({
-  timeout: 12000,
+  timeout: 12000
 });
 
 /* ======================
@@ -29,7 +29,7 @@ function cors(res) {
 }
 
 /* ======================
-   FORMAT
+   FORMAT MANGA
 ====================== */
 
 function fmtMdx(m) {
@@ -46,7 +46,7 @@ function fmtMdx(m) {
       (attr.description.en || Object.values(attr.description)[0])) ||
     "";
 
-  const coverRel = (m.relationships || []).find((r) => r.type === "cover_art");
+  const coverRel = (m.relationships || []).find(r => r.type === "cover_art");
 
   const coverFile =
     coverRel && coverRel.attributes && coverRel.attributes.fileName;
@@ -56,8 +56,8 @@ function fmtMdx(m) {
     : "";
 
   const genres = (attr.tags || [])
-    .filter((t) => t.attributes?.group === "genre")
-    .map((t) => t.attributes?.name?.en)
+    .filter(t => t.attributes?.group === "genre")
+    .map(t => t.attributes?.name?.en)
     .filter(Boolean);
 
   return {
@@ -68,12 +68,12 @@ function fmtMdx(m) {
     status: attr.status || "",
     genres,
     latestChapter: attr.lastChapter || "",
-    source: "MangaDex",
+    source: "MangaDex"
   };
 }
 
 /* ======================
-   GENRE MAP
+   GENRES
 ====================== */
 
 const GENRES = {
@@ -85,6 +85,8 @@ const GENRES = {
   romance: "423e2eae-a7a2-4a8b-ac03-a8351462d71d",
   horror: "cdad7e68-1419-41dd-bdce-27753074a640",
   mystery: "ee968100-4191-4968-93d3-f82d72be7e46",
+  scifi: "256c8bd9-4904-4360-bf4f-508a76d67183",
+  sliceoflife: "e5301a23-ebd9-49dd-a0cb-2add944c7fe9"
 };
 
 /* ======================
@@ -92,6 +94,7 @@ const GENRES = {
 ====================== */
 
 module.exports = async (req, res) => {
+
   cors(res);
 
   if (req.method === "OPTIONS") {
@@ -102,6 +105,7 @@ module.exports = async (req, res) => {
   const params = req.query || {};
 
   try {
+
     /* ======================
        ROOT
     ======================= */
@@ -109,7 +113,7 @@ module.exports = async (req, res) => {
     if (url === "/") {
       return res.json({
         status: "ok",
-        source: "MangaDex",
+        source: "MangaDex"
       });
     }
 
@@ -118,6 +122,7 @@ module.exports = async (req, res) => {
     ======================= */
 
     if (url.startsWith("/list")) {
+
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
 
@@ -135,7 +140,7 @@ module.exports = async (req, res) => {
         mangas,
         currentPage: page,
         totalPages,
-        hasNextPage: page < totalPages,
+        hasNextPage: page < totalPages
       });
     }
 
@@ -144,6 +149,7 @@ module.exports = async (req, res) => {
     ======================= */
 
     if (url.startsWith("/search")) {
+
       const q = params.query || "";
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
@@ -152,7 +158,7 @@ module.exports = async (req, res) => {
         return res.json({
           mangas: [],
           currentPage: 1,
-          totalPages: 1,
+          totalPages: 1
         });
       }
 
@@ -172,7 +178,7 @@ module.exports = async (req, res) => {
         mangas,
         currentPage: page,
         totalPages,
-        hasNextPage: page < totalPages,
+        hasNextPage: page < totalPages
       });
     }
 
@@ -181,6 +187,7 @@ module.exports = async (req, res) => {
     ======================= */
 
     if (url.startsWith("/genre")) {
+
       const genre = params.genre || "";
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 20;
@@ -191,7 +198,7 @@ module.exports = async (req, res) => {
         return res.json({
           mangas: [],
           currentPage: 1,
-          totalPages: 1,
+          totalPages: 1
         });
       }
 
@@ -207,7 +214,7 @@ module.exports = async (req, res) => {
         mangas,
         currentPage: page,
         totalPages: 10,
-        hasNextPage: true,
+        hasNextPage: true
       });
     }
 
@@ -216,6 +223,7 @@ module.exports = async (req, res) => {
     ======================= */
 
     if (url.startsWith("/manga/")) {
+
       const id = decodeURIComponent(url.replace("/manga/", ""));
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 100;
@@ -230,12 +238,12 @@ module.exports = async (req, res) => {
         `/manga/${mdxId}/feed?limit=100&offset=${offset}&order[chapter]=desc`
       );
 
-      const chapters = ((feed && feed.data) || []).map((c) => ({
+      const chapters = ((feed && feed.data) || []).map(c => ({
         id: "mdx:" + c.id,
         name: `Chapter ${c.attributes.chapter || "?"}`,
         date: c.attributes.publishAt
           ? c.attributes.publishAt.split("T")[0]
-          : "",
+          : ""
       }));
 
       const total = feed?.total || 0;
@@ -243,7 +251,7 @@ module.exports = async (req, res) => {
       return res.json({
         ...base,
         chapters,
-        chapterPages: Math.ceil(total / 100),
+        chapterPages: Math.ceil(total / 100)
       });
     }
 
@@ -252,6 +260,7 @@ module.exports = async (req, res) => {
     ======================= */
 
     if (url.startsWith("/chapter/")) {
+
       const raw = decodeURIComponent(url.replace("/chapter/", ""));
       const id = raw.replace(/^mdx:/, "");
 
@@ -264,18 +273,19 @@ module.exports = async (req, res) => {
       const base = data.baseUrl;
       const hash = data.chapter.hash;
 
-      const images = (data.chapter.data || []).map((f, i) => ({
-        img: `${base}/data/${hash}/${f}`,
-        page: i + 1,
+      const images = (data.chapter.dataSaver || []).map((f, i) => ({
+        img: `${base}/data-saver/${hash}/${f}`,
+        page: i + 1
       }));
 
       return res.json(images);
     }
 
     return res.status(404).json({ error: "Not found" });
+
   } catch (e) {
     return res.status(500).json({
-      error: e.message,
+      error: e.message
     });
   }
 };
