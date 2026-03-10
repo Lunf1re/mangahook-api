@@ -262,10 +262,8 @@ module.exports = async (req, res) => {
 
     /* ======================
        CHAPTER
-       FIX: Try at-home server first, fall back to dataSaver.
-       If at-home CDN node is unreliable, we return BOTH the
-       full-quality URL and a dataSaver fallback URL so the
-       client can retry on error.
+       Returns proxied image URLs — all images are fetched
+       server-side through /img?u=... to bypass CDN restrictions.
     ======================= */
 
     if (url.startsWith("/chapter/")) {
@@ -280,20 +278,69 @@ module.exports = async (req, res) => {
 
       const base = data.baseUrl;
       const hash = data.chapter.hash;
-      const hashSaver = data.chapter.hash; // same hash, different folder
+      const saverHash = data.chapter.hash;
       const fullFiles = data.chapter.data || [];
       const saverFiles = data.chapter.dataSaver || [];
 
-      // Build image list with primary URL + dataSaver fallback
-      const images = fullFiles.map((f, i) => ({
-        img: `${base}/data/${hash}/${f}`,
-        fallback: saverFiles[i]
-          ? `${base}/data-saver/${hashSaver}/${saverFiles[i]}`
-          : null,
-        page: i + 1,
-      }));
+      // Point all image URLs to our own /img proxy endpoint
+      const host = `https://${req.headers.host}`;
+      const images = fullFiles.map((f, i) => {
+        const primaryUrl = `${base}/data/${hash}/${f}`;
+        const saverUrl = saverFiles[i]
+          ? `${base}/data-saver/${saverHash}/${saverFiles[i]}`
+          : primaryUrl;
+        return {
+          img: `${host}/img?u=${encodeURIComponent(primaryUrl)}&fb=${encodeURIComponent(saverUrl)}`,
+          page: i + 1,
+        };
+      });
 
       return res.json(images);
+    }
+
+    /* ======================
+       IMAGE PROXY
+       Fetches a manga page image server-side and streams it
+       to the browser. Falls back to &fb= URL on error.
+    ======================= */
+
+    if (url.startsWith("/img")) {
+      const imgUrl = params.u ? decodeURIComponent(params.u) : "";
+      const fbUrl  = params.fb ? decodeURIComponent(params.fb) : "";
+
+      if (!imgUrl) return res.status(400).json({ error: "Missing url" });
+
+      const tryFetch = async (target) => {
+        return http.get(target, {
+          responseType: "arraybuffer",
+          timeout: 15000,
+          headers: {
+            "Referer": "https://mangadex.org/",
+            "User-Agent": "Mozilla/5.0 (compatible; MangaProxy/1.0)",
+          },
+        });
+      };
+
+      let imgRes;
+      try {
+        imgRes = await tryFetch(imgUrl);
+      } catch (e1) {
+        if (fbUrl) {
+          try {
+            imgRes = await tryFetch(fbUrl);
+          } catch (e2) {
+            return res.status(502).json({ error: "Both image URLs failed" });
+          }
+        } else {
+          return res.status(502).json({ error: "Image fetch failed" });
+        }
+      }
+
+      const ct = imgRes.headers["content-type"] || "image/jpeg";
+      res.setHeader("Content-Type", ct);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.status(200).send(Buffer.from(imgRes.data));
     }
 
     return res.status(404).json({ error: "Not found" });
