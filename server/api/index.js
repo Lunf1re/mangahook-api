@@ -85,6 +85,18 @@ const GENRES = {
   romance: "423e2eae-a7a2-4a8b-ac03-a8351462d71d",
   horror: "cdad7e68-1419-41dd-bdce-27753074a640",
   mystery: "ee968100-4191-4968-93d3-f82d72be7e46",
+  "sci-fi": "256c8bd9-4904-4360-bf4f-508a76d67183",
+  "slice-of-life": "e5301a23-ebd9-49dd-a0cb-2add944c7fe9",
+  sports: "69964a64-2f90-4d33-beeb-e3d1177d9f0b",
+  supernatural: "eabc5b4c-6aff-42f3-b657-3e90cbd00b75",
+  thriller: "07251805-a27e-4d59-b488-f0bfbec15168",
+  "martial-arts": "799c202e-7daa-44eb-9cf7-8a3c0441531e",
+  historical: "33771934-028e-4cb3-8744-691e866a923e",
+  "school-life": "caaa44eb-cd40-4177-b930-79d3ef2efa74",
+  ecchi: "b29d6a3d-1569-4e7a-8caf-7557bc92cd5d",
+  shounen: "27d5d93b-12bc-441e-86e8-3d8faf23e5c9",
+  seinen: "a3c67850-4684-404e-9b7f-c69850ee5da6",
+  shoujo: "a3c67850-4684-404e-9b7f-c69850ee5da7",
 };
 
 /* ======================
@@ -219,6 +231,7 @@ module.exports = async (req, res) => {
       const id = decodeURIComponent(url.replace("/manga/", ""));
       const page = Math.max(1, parseInt(params.page) || 1);
       const offset = (page - 1) * 100;
+      const lang = params.lang || "en";
 
       const mdxId = id.replace("mdx:", "");
 
@@ -227,7 +240,7 @@ module.exports = async (req, res) => {
       const base = fmtMdx(mangaData?.data);
 
       const feed = await mdx(
-        `/manga/${mdxId}/feed?limit=100&offset=${offset}&order[chapter]=desc`
+        `/manga/${mdxId}/feed?limit=100&offset=${offset}&order[chapter]=desc&translatedLanguage[]=${lang}`
       );
 
       const chapters = ((feed && feed.data) || []).map((c) => ({
@@ -249,6 +262,10 @@ module.exports = async (req, res) => {
 
     /* ======================
        CHAPTER
+       FIX: Try at-home server first, fall back to dataSaver.
+       If at-home CDN node is unreliable, we return BOTH the
+       full-quality URL and a dataSaver fallback URL so the
+       client can retry on error.
     ======================= */
 
     if (url.startsWith("/chapter/")) {
@@ -263,9 +280,16 @@ module.exports = async (req, res) => {
 
       const base = data.baseUrl;
       const hash = data.chapter.hash;
+      const hashSaver = data.chapter.hash; // same hash, different folder
+      const fullFiles = data.chapter.data || [];
+      const saverFiles = data.chapter.dataSaver || [];
 
-      const images = (data.chapter.data || []).map((f, i) => ({
+      // Build image list with primary URL + dataSaver fallback
+      const images = fullFiles.map((f, i) => ({
         img: `${base}/data/${hash}/${f}`,
+        fallback: saverFiles[i]
+          ? `${base}/data-saver/${hashSaver}/${saverFiles[i]}`
+          : null,
         page: i + 1,
       }));
 
