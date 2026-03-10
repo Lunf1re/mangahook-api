@@ -319,24 +319,20 @@ module.exports = async (req, res) => {
         return res.json(images);
       }
 
-      /* MangaDex chapters
-         Key insight: always use uploads.mangadex.org as base.
-         The at-home /at-home/server/ API sometimes returns volatile
-         volunteer CDN nodes that 404. uploads.mangadex.org is the
-         stable, permanent MangaDex-owned server that always works.
-      */
+      /* MangaDex chapters */
       const data = await mdx(`/at-home/server/${id}`);
       if (!data || !data.chapter) return res.status(500).json({ error:"Failed to load chapter" });
 
-      const STABLE_BASE = "https://uploads.mangadex.org";
-      const hash        = data.chapter.hash;
-      const fullFiles   = data.chapter.data || [];
-      const saverFiles  = data.chapter.dataSaver || [];
+      const base      = data.baseUrl;
+      const hash      = data.chapter.hash;
+      const fullFiles = data.chapter.data || [];
+      const saverFiles= data.chapter.dataSaver || [];
+
+      if (!fullFiles.length) return res.status(500).json({ error:"No pages found" });
 
       const images = fullFiles.map((f, i) => ({
-        // Always use stable uploads.mangadex.org — never the volatile at-home node
-        img:      `${STABLE_BASE}/data/${hash}/${f}`,
-        fallback: saverFiles[i] ? `${STABLE_BASE}/data-saver/${hash}/${saverFiles[i]}` : null,
+        img:      `${base}/data/${hash}/${f}`,
+        fallback: saverFiles[i] ? `${base}/data-saver/${hash}/${saverFiles[i]}` : null,
         page:     i + 1,
       }));
 
