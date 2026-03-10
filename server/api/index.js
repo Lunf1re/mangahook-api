@@ -1,7 +1,8 @@
 const axios = require("axios");
 
-const MDX  = "https://api.mangadex.org";
-const http = axios.create({ timeout: 15000 });
+const MDX    = "https://api.mangadex.org";
+const COMICK = "https://api.comick.fun";
+const http   = axios.create({ timeout: 15000 });
 
 /* ── CORS ────────────────────────────────────────────────────── */
 function cors(res) {
@@ -18,6 +19,27 @@ async function mdx(path) {
     });
     return r.data;
   } catch { return null; }
+}
+
+/* ── ComicK helper ───────────────────────────────────────────── */
+async function comick(path) {
+  try {
+    const r = await http.get(COMICK + path, {
+      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://comick.fun/" },
+    });
+    return r.data;
+  } catch { return null; }
+}
+
+/* ── Deduplicate by normalized title ─────────────────────────── */
+function dedup(list) {
+  const seen = new Map();
+  return list.filter(m => {
+    const key = m.title.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (seen.has(key)) return false;
+    seen.set(key, true);
+    return true;
+  });
 }
 
 /* ── Format one manga object ─────────────────────────────────── */
@@ -54,6 +76,29 @@ function fmt(m) {
     source:         "MangaDex",
     demographic:    a.publicationDemographic || "",
     year:           a.year || "",
+  };
+}
+
+/* ── Format ComicK manga ─────────────────────────────────────── */
+function fmtCk(m) {
+  if (!m) return null;
+  const md = m.md_comics || m;
+  const title = md.title || md.slug || "Unknown";
+  const image = md.cover_url ||
+    (md.md_covers && md.md_covers[0] && `https://meo.comick.pictures/${md.md_covers[0].b2key}`) || "";
+  const genres = (md.md_comic_md_genres || [])
+    .map(g => g.md_genres && g.md_genres.name).filter(Boolean);
+  return {
+    id:            "ck:" + (md.hid || md.slug),
+    title,
+    image,
+    description:   (md.desc || md.summary || "").substring(0, 300),
+    status:        md.status === 1 ? "ongoing" : md.status === 2 ? "completed" : "",
+    genres,
+    latestChapter: md.last_chapter ? String(md.last_chapter) : "",
+    source:        "ComicK",
+    demographic:   "",
+    year:          "",
   };
 }
 
@@ -122,15 +167,20 @@ module.exports = async (req, res) => {
   try {
 
     /* ── ROOT ─────────────────────────────────────────────────── */
-    if (url === "/") return res.json({ status:"ok", source:"MangaDex" });
+    if (url === "/") return res.json({ status:"ok", sources:["MangaDex","ComicK"] });
 
     /* ── LIST ─────────────────────────────────────────────────── */
     if (url === "/list" || url.startsWith("/list")) {
       const page   = Math.max(1, parseInt(p.page) || 1);
       const offset = (page - 1) * 20;
-      const data   = await mdx(listQ(offset));
-      const mangas = (data?.data || []).map(fmt).filter(Boolean);
-      const total  = Math.min(Math.ceil((data?.total || 200) / 20), 50);
+      const [mdxData, ckData] = await Promise.all([
+        mdx(listQ(offset)),
+        comick(`/top?page=${page}`),
+      ]);
+      const mdxMangas = ((mdxData && mdxData.data) || []).map(fmt).filter(Boolean);
+      const ckMangas  = ((ckData && ckData.rank)   || []).map(fmtCk).filter(Boolean);
+      const mangas    = dedup([...mdxMangas, ...ckMangas]);
+      const total     = Math.min(Math.ceil(((mdxData && mdxData.total) || 200) / 20), 50);
       return res.json({ mangas, currentPage:page, totalPages:total, hasNextPage:page<total });
     }
 
@@ -140,14 +190,14 @@ module.exports = async (req, res) => {
       if (!q) return res.json({ mangas:[], currentPage:1, totalPages:1 });
       const page   = Math.max(1, parseInt(p.page) || 1);
       const offset = (page - 1) * 20;
-      const data   = await mdx(
-        `/manga?limit=20&offset=${offset}`
-        + `&title=${encodeURIComponent(q)}`
-        + `&includes[]=cover_art`
-        + `&contentRating[]=safe&contentRating[]=suggestive`
-      );
-      const mangas = (data?.data || []).map(fmt).filter(Boolean);
-      const total  = Math.min(Math.ceil((data?.total || 20) / 20), 20);
+      const [mdxData, ckData] = await Promise.all([
+        mdx(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive`),
+        comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=20&page=${page}`),
+      ]);
+      const mdxMangas = ((mdxData && mdxData.data) || []).map(fmt).filter(Boolean);
+      const ckMangas  = (Array.isArray(ckData) ? ckData : []).map(fmtCk).filter(Boolean);
+      const mangas    = dedup([...mdxMangas, ...ckMangas]);
+      const total     = Math.min(Math.ceil(((mdxData && mdxData.total) || 20) / 20), 20);
       return res.json({ mangas, currentPage:page, totalPages:total, hasNextPage:page<total });
     }
 
@@ -167,28 +217,47 @@ module.exports = async (req, res) => {
       }
 
       const data   = await mdx(listQ(offset, extra));
-      const mangas = (data?.data || []).map(fmt).filter(Boolean);
-      const total  = Math.min(Math.ceil((data?.total || 200) / 20), 25);
+      const mangas = ((data && data.data) || []).map(fmt).filter(Boolean);
+      const total  = Math.min(Math.ceil(((data && data.total) || 200) / 20), 25);
       return res.json({ mangas, currentPage:page, totalPages:total, hasNextPage:page<total });
     }
 
     /* ── MANGA DETAIL ─────────────────────────────────────────── */
     if (url.startsWith("/manga/")) {
-      const id     = decodeURIComponent(url.replace("/manga/", "")).replace(/^mdx:/, "");
+      const rawId  = decodeURIComponent(url.replace("/manga/", ""));
       const page   = Math.max(1, parseInt(p.page) || 1);
       const offset = (page - 1) * 100;
       const lang   = p.lang || "en";
 
-      // Fetch manga info + chapters in parallel
+      /* ComicK manga detail */
+      if (rawId.startsWith("ck:")) {
+        const hid      = rawId.replace("ck:", "");
+        const [comicData, chapData] = await Promise.all([
+          comick(`/comic/${hid}`),
+          comick(`/comic/${hid}/chapters?lang=${lang}&limit=300&page=1`),
+        ]);
+        const base     = fmtCk((comicData && (comicData.comic || comicData)));
+        if (!base) return res.status(404).json({ error:"Manga not found" });
+        const chapters = ((chapData && chapData.chapters) || []).map(c => ({
+          id:   "ck:" + c.hid,
+          name: "Chapter " + (c.chap || "?"),
+          date: c.created_at ? c.created_at.split("T")[0] : "",
+          lang: lang,
+        }));
+        return res.json({ ...base, chapters, chapterPages:1 });
+      }
+
+      /* MangaDex manga detail */
+      const id = rawId.replace(/^mdx:/, "");
       const [mangaData, feed] = await Promise.all([
         mdx(`/manga/${id}?includes[]=cover_art`),
         mdx(`/manga/${id}/feed?limit=100&offset=${offset}&order[chapter]=desc&translatedLanguage[]=${lang}`),
       ]);
 
-      const base = fmt(mangaData?.data);
+      const base = fmt(mangaData && mangaData.data);
       if (!base) return res.status(404).json({ error:"Manga not found" });
 
-      let chapters = (feed?.data || []).map(c => ({
+      let chapters = ((feed && feed.data) || []).map(c => ({
         id:   "mdx:" + c.id,
         name: "Chapter " + (c.attributes.chapter || "?"),
         date: c.attributes.publishAt ? c.attributes.publishAt.split("T")[0] : "",
@@ -198,7 +267,7 @@ module.exports = async (req, res) => {
       // No chapters in requested lang → fall back to ALL languages
       if (chapters.length === 0) {
         const all = await mdx(`/manga/${id}/feed?limit=100&offset=${offset}&order[chapter]=desc`);
-        chapters = (all?.data || []).map(c => ({
+        chapters = ((all && all.data) || []).map(c => ({
           id:   "mdx:" + c.id,
           name: "Chapter " + (c.attributes.chapter || "?"),
           date: c.attributes.publishAt ? c.attributes.publishAt.split("T")[0] : "",
@@ -209,27 +278,68 @@ module.exports = async (req, res) => {
       return res.json({
         ...base,
         chapters,
-        chapterPages: Math.ceil((feed?.total || chapters.length) / 100) || 1,
+        chapterPages: Math.ceil(((feed && feed.total) || chapters.length) / 100) || 1,
       });
     }
 
+
     /* ── CHAPTER ──────────────────────────────────────────────── */
     if (url.startsWith("/chapter/")) {
-      const id   = decodeURIComponent(url.replace("/chapter/", "")).replace(/^mdx:/, "");
-      const data = await mdx(`/at-home/server/${id}`);
-      if (!data || !data.chapter) return res.status(500).json({ error:"Failed to load chapter" });
+      const raw    = decodeURIComponent(url.replace("/chapter/", ""));
+      const prefix = raw.startsWith("ck:") ? "ck" : "mdx";
+      const id     = raw.replace(/^(mdx:|ck:)/, "");
 
-      const base       = data.baseUrl;
-      const hash       = data.chapter.hash;
-      const fullFiles  = data.chapter.data || [];
-      const saverFiles = data.chapter.dataSaver || [];
-      const host       = "https://" + req.headers.host;
+      /* ComicK chapters */
+      if (prefix === "ck") {
+        const data = await comick(`/chapter/${id}`);
+        const images = ((data && data.chapter && data.chapter.md_images) || []).map((img, i) => ({
+          img:  `https://meo.comick.pictures/${img.b2key}`,
+          page: i + 1,
+        }));
+        return res.json(images);
+      }
 
+      /* MangaDex chapters — retry until we get a healthy CDN node */
+      let data = null;
+      let base, hash, fullFiles, saverFiles;
+
+      for (let attempt = 0; attempt < 4; attempt++) {
+        data = await mdx(`/at-home/server/${id}`);
+        if (!data || !data.chapter) break;
+
+        base       = data.baseUrl;
+        hash       = data.chapter.hash;
+        fullFiles  = data.chapter.data || [];
+        saverFiles = data.chapter.dataSaver || [];
+
+        // Quick HEAD check on the first image to verify this CDN node works
+        if (fullFiles.length > 0) {
+          try {
+            const testUrl = `${base}/data/${hash}/${fullFiles[0]}`;
+            const check   = await http.head(testUrl, {
+              timeout: 5000,
+              headers: { "Referer": "https://mangadex.org/" },
+            });
+            if (check.status === 200) break; // Good node found
+          } catch { /* node is bad, retry */ }
+        } else {
+          break;
+        }
+
+        // Small delay before retry so MangaDex returns a different node
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      if (!data || !data.chapter || !fullFiles || fullFiles.length === 0) {
+        return res.status(500).json({ error: "Failed to load chapter pages" });
+      }
+
+      const host   = "https://" + req.headers.host;
       const images = fullFiles.map((f, i) => {
-        const primary = base + "/data/" + hash + "/" + f;
-        const saver   = saverFiles[i] ? base + "/data-saver/" + hash + "/" + saverFiles[i] : primary;
+        const primary = `${base}/data/${hash}/${f}`;
+        const saver   = saverFiles[i] ? `${base}/data-saver/${hash}/${saverFiles[i]}` : primary;
         return {
-          img:  host + "/img?u=" + encodeURIComponent(primary) + "&fb=" + encodeURIComponent(saver),
+          img:  `${host}/img?u=${encodeURIComponent(primary)}&fb=${encodeURIComponent(saver)}`,
           page: i + 1,
         };
       });
@@ -259,12 +369,15 @@ module.exports = async (req, res) => {
         catch { return res.status(502).end(); }
       }
 
+      // If status is not 2xx, try fallback
+      if (upstream.status && upstream.status >= 400 && fbUrl) {
+        try { upstream = await tryStream(fbUrl); } catch { return res.status(502).end(); }
+      }
+
       res.setHeader("Content-Type",  upstream.headers["content-type"] || "image/jpeg");
       res.setHeader("Cache-Control", "public, max-age=86400");
       res.setHeader("Access-Control-Allow-Origin", "*");
-      if (upstream.headers["content-length"]) {
-        res.setHeader("Content-Length", upstream.headers["content-length"]);
-      }
+      if (upstream.headers["content-length"]) res.setHeader("Content-Length", upstream.headers["content-length"]);
       upstream.data.pipe(res);
       upstream.data.on("error", () => res.end());
       return;
