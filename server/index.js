@@ -3,7 +3,7 @@ const { URL } = require("url");
 
 const MDX    = "https://api.mangadex.org";
 const COMICK = "https://api.comick.fun";
-const http   = axios.create({ timeout: 15000 });
+const http   = axios.create({ timeout: 9000 }); // Vercel Hobby = 10s max
 
 /* ── CORS ────────────────────────────────────────────────────── */
 function cors(res) {
@@ -19,7 +19,20 @@ async function mdx(path) {
       headers: { "User-Agent": "MangaProxy/3.0" },
     });
     return r.data;
-  } catch { return null; }
+  } catch (e) {
+    console.error("MDX error", path, e?.response?.status, e?.message);
+    return null;
+  }
+}
+
+/* ── MDX with retry (for at-home server) ────────────────────── */
+async function mdxRetry(path, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    const data = await mdx(path);
+    if (data) return data;
+    if (i < tries - 1) await new Promise(r => setTimeout(r, 500 * (i + 1)));
+  }
+  return null;
 }
 
 /* ── ComicK helper ───────────────────────────────────────────── */
@@ -29,7 +42,10 @@ async function comick(path) {
       headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://comick.fun/" },
     });
     return r.data;
-  } catch { return null; }
+  } catch (e) {
+    console.error("ComicK error", path, e?.response?.status, e?.message);
+    return null;
+  }
 }
 
 /* ── Deduplicate by normalized title ─────────────────────────── */
@@ -306,37 +322,46 @@ module.exports = async (req, res) => {
       const prefix = raw.startsWith("ck:") ? "ck" : "mdx";
       const id     = raw.replace(/^(mdx:|ck:)/, "");
 
-      /* ComicK chapters — direct CDN, no issues */
+      /* ComicK chapters */
       if (prefix === "ck") {
         const data = await comick(`/chapter/${id}`);
-        if (!data) return res.status(500).json({ error:"Failed to load chapter" });
+        if (!data) return res.status(500).json({ error: "ComicK chapter not found", id });
 
-        // ComicK can return images in different structures
         const chap = data.chapter || data;
         const imgs = chap.md_images || chap.images || data.images || [];
 
-        const images = imgs.map((img, i) => ({
-          img:  `https://meo.comick.pictures/${img.b2key || img.name || img}`,
-          page: i + 1,
-        })).filter(x => x.img && !x.img.endsWith("/"));
+        if (!imgs.length) return res.status(500).json({ error: "No images in ComicK chapter", id });
+
+        const images = imgs.map((img, i) => {
+          const key = typeof img === "string" ? img : (img.b2key || img.name || "");
+          return { img: `https://meo.comick.pictures/${key}`, page: i + 1 };
+        }).filter(x => x.img && x.img !== "https://meo.comick.pictures/");
 
         return res.json(images);
       }
 
-      /* MangaDex chapters */
-      const data = await mdx(`/at-home/server/${id}`);
-      if (!data || !data.chapter) return res.status(500).json({ error:"Failed to load chapter" });
+      /* MangaDex chapters — use retry */
+      const data = await mdxRetry(`/at-home/server/${id}`);
+      if (!data) return res.status(500).json({ error: "MangaDex at-home server unreachable", id });
+      if (!data.chapter) return res.status(500).json({ error: "MangaDex chapter data missing", id, keys: Object.keys(data) });
 
-      const base      = data.baseUrl;
-      const hash      = data.chapter.hash;
-      const fullFiles = data.chapter.data || [];
-      const saverFiles= data.chapter.dataSaver || [];
+      const baseUrl    = data.baseUrl;
+      const hash       = data.chapter.hash;
+      const fullFiles  = data.chapter.data || [];
+      const saverFiles = data.chapter.dataSaver || [];
 
-      if (!fullFiles.length) return res.status(500).json({ error:"No pages found" });
+      // Prefer dataSaver if full is empty (sometimes happens)
+      const useFiles  = fullFiles.length ? fullFiles : saverFiles;
+      const usePath   = fullFiles.length ? "data" : "data-saver";
+      const useHash   = hash;
 
-      const images = fullFiles.map((f, i) => ({
-        img:      `${base}/data/${hash}/${f}`,
-        fallback: saverFiles[i] ? `${base}/data-saver/${hash}/${saverFiles[i]}` : null,
+      if (!useFiles.length) return res.status(500).json({ error: "No pages found", id, chapter: data.chapter });
+
+      const images = useFiles.map((f, i) => ({
+        img:      `${baseUrl}/${usePath}/${useHash}/${f}`,
+        fallback: saverFiles[i] && usePath === "data"
+                    ? `${baseUrl}/data-saver/${useHash}/${saverFiles[i]}`
+                    : null,
         page:     i + 1,
       }));
 
