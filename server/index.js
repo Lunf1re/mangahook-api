@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { URL } = require("url");
 
 const MDX    = "https://api.mangadex.org";
 const COMICK = "https://api.comick.fun";
@@ -161,8 +162,11 @@ module.exports = async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const url = (req.url || "/").split("?")[0];
-  const p   = req.query || {};
+  // Use modern URL API — avoids deprecated url.parse() in Node 24
+  const reqUrl  = req.url || "/";
+  const parsed  = new URL(reqUrl, "http://localhost");
+  const url     = parsed.pathname;
+  const p       = Object.fromEntries(parsed.searchParams.entries());
 
   try {
 
